@@ -1,0 +1,20 @@
+{
+  "name": "tokensentinel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "tokenSentinel — insider fraud detection for prepaid vending systems, built for The Future Is Hers hackathon (Track 2: Cyber Safe & Secure).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.1"
+  }
+}
