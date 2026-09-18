@@ -3,6 +3,8 @@ import { verticals, verticalKeys } from '../data/verticals.js'
 const NAV_ITEMS = [
   { key: 'overview', label: 'Overview' },
   { key: 'incidents', label: 'Incidents' },
+  { key: 'verify', label: 'Verify token' },
+  { key: 'challenge', label: 'Spot the fraud' },
   { key: 'operators', label: 'Operators' },
   { key: 'methodology', label: 'How it works' },
 ]

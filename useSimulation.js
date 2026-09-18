@@ -37,6 +37,49 @@ function randomAccountId() {
   return `${a}-${b}-${c}`
 }
 
+
+/**
+ * Real STS prepaid tokens are 20 decimal digits encoding an encrypted block.
+ * You cannot tell a genuine token from a fake one by inspection — only the
+ * meter (or the issuing system's own ledger) knows. We model that here: the
+ * last digit is a Luhn check digit, so structurally malformed input is caught
+ * instantly, and every genuinely issued token is written to an issuance
+ * registry that verification checks against.
+ */
+function luhnCheckDigit(digits) {
+  let sum = 0
+  let dbl = true
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = Number(digits[i])
+    if (dbl) {
+      d *= 2
+      if (d > 9) d -= 9
+    }
+    sum += d
+    dbl = !dbl
+  }
+  return (10 - (sum % 10)) % 10
+}
+
+function luhnValid(digits) {
+  if (digits.length !== 20) return false
+  return luhnCheckDigit(digits.slice(0, 19)) === Number(digits[19])
+}
+
+function makeTokenCode() {
+  let body = ''
+  for (let i = 0; i < 19; i++) body += Math.floor(Math.random() * 10)
+  return body + luhnCheckDigit(body)
+}
+
+export function fmtToken(code) {
+  return (code.match(/.{1,4}/g) || []).join(' ')
+}
+
+function normaliseToken(input) {
+  return (input || '').replace(/\D/g, '')
+}
+
 /**
  * Encapsulates the tokenSentinel simulation for a single vertical (electricity,
  * water, airtime, transit, grants, retail — see data/verticals.js). Generates
@@ -62,6 +105,9 @@ export function useSimulation(verticalKey) {
   const feedIdRef = useRef(0)
   const incidentIdRef = useRef(1000)
   const systemRiskRef = useRef(8)
+  // code -> issuance record. This is the utility's own ledger of every token
+  // it actually issued; anything not in here was never issued by the system.
+  const registryRef = useRef(new Map())
 
   const [operators, setOperators] = useState(operatorsRef.current)
   const [feed, setFeed] = useState([])
@@ -112,6 +158,7 @@ export function useSimulation(verticalKey) {
 
     op.history = [...op.history, amount].slice(-40)
     const accountId = randomAccountId()
+    const tokenCode = makeTokenCode()
 
     setStats((prev) => ({
       issuedToday: prev.issuedToday + 1,
@@ -120,16 +167,18 @@ export function useSimulation(verticalKey) {
       lossIntercepted: prev.lossIntercepted + (isAnomaly ? amount * rand(0.6, 1) : 0),
     }))
 
+    let incidentId = null
     if (isAnomaly) {
       systemRiskRef.current = Math.min(100, systemRiskRef.current + rand(6, 12))
       op.riskScore = Math.min(100, Math.round(op.riskScore * 0.6 + score * 0.4 + 8))
 
       incidentIdRef.current += 1
+      incidentId = 'INC-' + incidentIdRef.current
       const severity = score > 70 ? 'high' : score > 50 ? 'med' : 'low'
       setIncidents((prev) =>
         [
           {
-            id: 'INC-' + incidentIdRef.current,
+            id: incidentId,
             operator: op.id,
             depot: op.depot,
             accountId,
@@ -148,11 +197,26 @@ export function useSimulation(verticalKey) {
 
     setSystemRisk(Math.max(3, Math.min(100, systemRiskRef.current)))
 
+    registryRef.current.set(tokenCode, {
+      code: tokenCode,
+      opId: op.id,
+      depot: op.depot,
+      accountId,
+      amount,
+      score: Math.round(score),
+      isAnomaly,
+      reason,
+      incidentId,
+      status: isAnomaly ? 'flagged' : 'clean',
+      time: nowStr(),
+    })
+
     feedIdRef.current += 1
     setFeed((prev) =>
       [
         {
           key: feedIdRef.current,
+          tokenCode,
           opId: op.id,
           depot: op.depot,
           accountId,
@@ -180,6 +244,7 @@ export function useSimulation(verticalKey) {
     feedIdRef.current = 0
     incidentIdRef.current = 1000
     systemRiskRef.current = 8
+    registryRef.current = new Map()
 
     setOperators(operatorsRef.current)
     setFeed([])
@@ -199,7 +264,121 @@ export function useSimulation(verticalKey) {
 
   function updateIncident(id, status) {
     setIncidents((prev) => prev.map((inc) => (inc.id === id ? { ...inc, status } : inc)))
+    // Keep the issuance registry in step, so a token blocked from the incident
+    // queue immediately verifies as blocked at the counter.
+    for (const rec of registryRef.current.values()) {
+      if (rec.incidentId === id) rec.status = status === 'blocked' ? 'blocked' : 'flagged'
+    }
   }
 
-  return { vertical, operators, feed, incidents, chartPoints, systemRisk, stats, updateIncident }
+  /**
+   * Three-state verification, deliberately not a real/fake binary.
+   *
+   * The dangerous case in insider fraud is a token that is entirely real —
+   * genuinely issued by the utility's own system — but issued fraudulently.
+   * A binary check would wave that through. So we return:
+   *   invalid   — fails structure, never could have been issued
+   *   unissued  — well-formed but absent from the issuance ledger (forged)
+   *   blocked   — issued, then blocked by an investigator
+   *   suspect   — issued, but the issuance itself was flagged
+   *   valid     — issued through a clean, in-baseline event
+   */
+  function verifyToken(input) {
+    const digits = normaliseToken(input)
+
+    if (digits.length !== 20) {
+      return {
+        verdict: 'invalid',
+        headline: 'Malformed token',
+        detail: `A ${vertical.unitLabel} is 20 digits. This input has ${digits.length}.`,
+        checks: [
+          { label: 'Structure', pass: false, note: `${digits.length}/20 digits` },
+          { label: 'Issuance registry', pass: null, note: 'not reached' },
+          { label: 'Issuance risk', pass: null, note: 'not reached' },
+        ],
+      }
+    }
+
+    if (!luhnValid(digits)) {
+      return {
+        verdict: 'invalid',
+        headline: 'Failed integrity check',
+        detail:
+          'The check digit does not match the token body. This is either a capture error or a fabricated code.',
+        checks: [
+          { label: 'Structure', pass: false, note: 'check digit mismatch' },
+          { label: 'Issuance registry', pass: null, note: 'not reached' },
+          { label: 'Issuance risk', pass: null, note: 'not reached' },
+        ],
+      }
+    }
+
+    const rec = registryRef.current.get(digits)
+
+    if (!rec) {
+      return {
+        verdict: 'unissued',
+        headline: 'Never issued by this utility',
+        detail: `Well-formed, but no issuance event in the ledger produced this ${vertical.unitLabel}. Treat as forged and do not credit the ${vertical.accountLabel}.`,
+        checks: [
+          { label: 'Structure', pass: true, note: '20 digits, check digit valid' },
+          { label: 'Issuance registry', pass: false, note: 'no matching issuance' },
+          { label: 'Issuance risk', pass: null, note: 'not applicable' },
+        ],
+      }
+    }
+
+    const base = [
+      { label: 'Structure', pass: true, note: '20 digits, check digit valid' },
+      {
+        label: 'Issuance registry',
+        pass: true,
+        note: `issued by ${rec.opId} · ${rec.depot} · ${rec.time}`,
+      },
+    ]
+
+    if (rec.status === 'blocked') {
+      return {
+        verdict: 'blocked',
+        headline: 'Issued, then blocked',
+        detail: `This ${vertical.unitLabel} was issued by ${rec.opId} and subsequently blocked by an investigator${rec.incidentId ? ' under ' + rec.incidentId : ''}. Do not honour it.`,
+        record: rec,
+        checks: [...base, { label: 'Issuance risk', pass: false, note: 'blocked by investigator' }],
+      }
+    }
+
+    if (rec.isAnomaly) {
+      return {
+        verdict: 'suspect',
+        headline: 'Real token, suspicious issuance',
+        detail: `Genuinely issued — but the issuance event scored ${rec.score}/100 for ${rec.reason || 'behavioral deviation'}. This is the insider case: the ${vertical.unitLabel} is authentic, the transaction behind it is not.`,
+        record: rec,
+        checks: [
+          ...base,
+          { label: 'Issuance risk', pass: false, note: `score ${rec.score}/100 · ${rec.reason || 'behavioral deviation'}` },
+        ],
+      }
+    }
+
+    return {
+      verdict: 'valid',
+      headline: 'Verified',
+      detail: `Issued through a clean event by ${rec.opId} at ${rec.depot}, within that ${vertical.entityLabel}'s normal baseline.`,
+      record: rec,
+      checks: [...base, { label: 'Issuance risk', pass: true, note: `score ${rec.score}/100 · within baseline` }],
+    }
+  }
+
+  return {
+    vertical,
+    operators,
+    feed,
+    incidents,
+    chartPoints,
+    systemRisk,
+    stats,
+    updateIncident,
+    verifyToken,
+    makeTokenCode,
+  }
 }
