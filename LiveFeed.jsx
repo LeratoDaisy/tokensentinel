@@ -1,4 +1,6 @@
 import { fmtR } from '../hooks/useSimulation.js'
+// SECURITY: hides real account/meter numbers on screen
+import { hashId } from '../utils/security.js'
 
 export default function LiveFeed({ feed, vertical }) {
   return (
@@ -13,7 +15,8 @@ export default function LiveFeed({ feed, vertical }) {
             <div className="op">{row.opId}</div>
             <div className="detail">
               {row.depot}
-              <span style={{ color: 'var(--text-3)' }}> · #{row.accountId}</span>
+              {/* SECURITY: was #{row.accountId} — now shows a masked code instead of the real ID */}
+              <span style={{ color: 'var(--text-3)' }}> · #{hashId(row.accountId)}</span>
               {row.isAnomaly && <span className="flag-pill">{row.reason.toUpperCase()}</span>}
             </div>
             <div className="amt">{fmtR(row.amount)}</div>
